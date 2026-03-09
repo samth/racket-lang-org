@@ -1,0 +1,114 @@
+name: PR Preview
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+# Only one preview build per PR at a time; cancel in-progress runs
+concurrency:
+  group: pr-preview-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Racket
+        uses: Bogdanp/setup-racket@v1
+        with:
+          version: 'stable'
+
+      - name: Cache Racket packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/share/racket
+          key: racket-pkgs-${{ hashFiles('info.rkt') }}
+          restore-keys: racket-pkgs-
+
+      - name: Install package dependencies
+        run: raco pkg install --auto --batch --no-docs .
+
+      - name: Install Python dependencies
+        run: pip install pygments
+
+      - name: Build site
+        run: |
+          # Use xvfb for GUI library dependencies (plot-gui-lib, gui-lib)
+          sudo apt-get install -y xvfb
+          xvfb-run racket all.rkt -o build-output -f -r
+
+      - name: Generate preview index page
+        run: |
+          PR_NUM=${{ github.event.pull_request.number }}
+          PR_TITLE="${{ github.event.pull_request.title }}"
+          SHA="${{ github.event.pull_request.head.sha }}"
+          cat > build-output/index.html << HTMLEOF
+          <!DOCTYPE html>
+          <html>
+          <head>
+            <meta charset="utf-8">
+            <title>PR #${PR_NUM} Preview - racket-lang-org</title>
+            <style>
+              body { font-family: sans-serif; max-width: 800px; margin: 2em auto; padding: 0 1em; }
+              h1 { color: #333; }
+              .meta { color: #666; font-size: 0.9em; margin-bottom: 2em; }
+              ul { list-style: none; padding: 0; }
+              li { margin: 0.5em 0; }
+              a { color: #2a5db0; text-decoration: none; font-size: 1.1em; }
+              a:hover { text-decoration: underline; }
+            </style>
+          </head>
+          <body>
+            <h1>PR #${PR_NUM} Preview</h1>
+            <div class="meta">
+              <p><strong>${PR_TITLE}</strong></p>
+              <p>Commit: <code>${SHA:0:8}</code></p>
+            </div>
+            <h2>Sub-sites</h2>
+            <ul>
+          HTMLEOF
+
+          # List all subdirectories that were built
+          for dir in build-output/*/; do
+            name=$(basename "$dir")
+            echo "      <li><a href=\"${name}/\">${name}</a></li>" >> build-output/index.html
+          done
+
+          cat >> build-output/index.html << 'HTMLEOF'
+            </ul>
+          </body>
+          </html>
+          HTMLEOF
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: site-preview-pr-${{ github.event.pull_request.number }}
+          path: build-output/
+          retention-days: 30
+
+      - name: Deploy to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./build-output
+          destination_dir: pr/${{ github.event.pull_request.number }}
+          keep_files: true
+
+      - name: Comment on PR with preview link
+        uses: peter-evans/create-or-update-comment@v4
+        with:
+          issue-number: ${{ github.event.pull_request.number }}
+          body: |
+            **Preview deployed!**
+
+            https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/pr/${{ github.event.pull_request.number }}/
+
+            Built from ${{ github.event.pull_request.head.sha }}
+          comment-tag: pr-preview
